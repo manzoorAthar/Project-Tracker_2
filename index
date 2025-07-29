@@ -1,0 +1,1737 @@
+import React, { useState, useEffect, createContext, useContext } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
+import { getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc, onSnapshot, setDoc, getDoc } from 'firebase/firestore';
+import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { PieChart, Pie, Cell, ResponsiveContainer, Sector, Tooltip, Legend } from 'recharts';
+
+// Define the Firebase context
+const FirebaseContext = createContext(null);
+
+// Custom hook to use Firebase context
+const useFirebase = () => useContext(FirebaseContext);
+
+// Helper function to convert Google Drive share links to direct links
+const getGoogleDriveDirectLink = (url) => {
+    if (!url || typeof url !== 'string') return url;
+
+    const googleDriveFileIdMatch = url.match(/file\/d\/([a-zA-Z0-9_-]+)/);
+    if (googleDriveFileIdMatch && googleDriveFileIdMatch[1]) {
+        const fileId = googleDriveFileIdMatch[1];
+        if (url.includes('image')) {
+             return `https://drive.google.com/uc?export=view&id=${fileId}`;
+        }
+        return `https://drive.google.com/uc?export=download&id=${fileId}`;
+    }
+    return url;
+};
+
+// ImageEnlargeModal Component
+const ImageEnlargeModal = ({ show, imageUrl, onClose }) => {
+    if (!show || !imageUrl) return null;
+
+    return (
+        <div className="fixed inset-0 bg-gray-800 bg-opacity-75 flex items-center justify-center p-4 z-[100]">
+            <div className="relative bg-white rounded-lg shadow-xl p-4 max-w-3xl max-h-[90vh] overflow-auto">
+                <button
+                    onClick={onClose}
+                    className="absolute top-2 right-2 bg-red-500 text-white rounded-full p-2 text-sm font-bold hover:bg-red-700 transition duration-300"
+                >
+                    X
+                </button>
+                <img src={imageUrl} alt="Enlarged Product" className="max-w-full max-h-[85vh] object-contain mx-auto" onError={(e) => { e.target.onerror = null; e.target.src = "https://placehold.co/600x400/cccccc/000000?text=Image+Not+Found"; }} />
+            </div>
+        </div>
+    );
+};
+
+// ProjectModal Component for Add/Edit/View Project
+const ProjectModal = ({ show, onClose, project, onSave, isEditing, onEditRequest, storage, userId }) => {
+    const [name, setName] = useState('');
+    const [category, setCategory] = useState('NPD');
+    const [vendorName, setVendorName] = useState('');
+    const [vendorPhone, setVendorPhone] = useState('');
+    const [vendorAddress, setVendorAddress] = useState('');
+    const [projectManager, setProjectManager] = useState('');
+    const [status, setStatus] = useState('Planning');
+    const [startDate, setStartDate] = useState('');
+    const [estimatedDate, setEstimatedDate] = useState('');
+    const [reminderDuration, setReminderDuration] = useState(7);
+    const [remarks, setRemarks] = useState('');
+    const [priority, setPriority] = useState('Medium-1');
+    const [productSegment, setProductSegment] = useState('Plastic Storage');
+    const [procurementCost, setProcurementCost] = useState('');
+    const [procurementCurrency, setProcurementCurrency] = useState('USD');
+    const [mrp, setMrp] = useState('');
+    const [mrpCurrency, setMrpCurrency] = useState('USD');
+    const [barcodeType, setBarcodeType] = useState('EAN-13');
+    const [barcodeNumber, setBarcodeNumber] = useState('');
+    const [mrpStickerUrl, setMrpStickerUrl] = useState('');
+    const [productImageUrl, setProductImageUrl] = useState('');
+    const [error, setError] = useState('');
+    const [uploadingImage, setUploadingImage] = useState(false);
+    const [uploadingPdf, setUploadingPdf] = useState(false);
+
+    useEffect(() => {
+        if (project) {
+            setName(project.name || '');
+            setCategory(project.category || 'NPD');
+            setVendorName(project.vendorName || '');
+            setVendorPhone(project.vendorPhone || '');
+            setVendorAddress(project.vendorAddress || '');
+            setProjectManager(project.projectManager || '');
+            setStatus(project.status || 'Planning');
+            setStartDate(project.startDate || '');
+            setEstimatedDate(project.estimatedDate || '');
+            setReminderDuration(project.reminderDuration || 7);
+            setRemarks(project.remarks || '');
+            setPriority(project.priority || 'Medium-1');
+            setProductSegment(project.productSegment || 'Plastic Storage');
+            setProcurementCost(project.procurementCost || '');
+            setProcurementCurrency(project.procurementCurrency || 'USD');
+            setMrp(project.mrp || '');
+            setMrpCurrency(project.mrpCurrency || 'USD');
+            setBarcodeType(project.barcodeType || 'EAN-13');
+            setBarcodeNumber(project.barcodeNumber || '');
+            setMrpStickerUrl(getGoogleDriveDirectLink(project.mrpStickerUrl) || '');
+            setProductImageUrl(getGoogleDriveDirectLink(project.productImageUrl) || '');
+        } else {
+            setName('');
+            setCategory('NPD');
+            setVendorName('');
+            setVendorPhone('');
+            setVendorAddress('');
+            setProjectManager('');
+            setStatus('Planning');
+            setStartDate('');
+            setEstimatedDate('');
+            setReminderDuration(7);
+            setRemarks('');
+            setPriority('Medium-1');
+            setProductSegment('Plastic Storage');
+            setProcurementCost('');
+            setProcurementCurrency('USD');
+            setMrp('');
+            setMrpCurrency('USD');
+            setBarcodeType('EAN-13');
+            setBarcodeNumber('');
+            setMrpStickerUrl('');
+            setProductImageUrl('');
+        }
+        setError('');
+    }, [project, show]);
+
+    const uploadFile = async (file, folderName) => {
+        if (!storage || !userId) {
+            setError("Firebase Storage not initialized or user not authenticated.");
+            return null;
+        }
+        const projectIdForPath = project?.id || crypto.randomUUID();
+        const filePath = `artifacts/${__app_id}/users/${userId}/${folderName}/${projectIdForPath}/${file.name}`;
+        const fileRef = ref(storage, filePath);
+        try {
+            const snapshot = await uploadBytes(fileRef, file);
+            const downloadURL = await getDownloadURL(snapshot.ref);
+            return downloadURL;
+        } catch (uploadError) {
+            console.error("Error uploading file:", uploadError);
+            setError(`Failed to upload file: ${uploadError.message}`);
+            return null;
+        }
+    };
+
+    const handleProductImageUpload = async (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            setUploadingImage(true);
+            setError('');
+            const url = await uploadFile(file, 'product_images');
+            if (url) {
+                setProductImageUrl(url);
+            }
+            setUploadingImage(false);
+            e.target.value = null;
+        }
+    };
+
+    const handleMrpStickerUpload = async (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            setUploadingPdf(true);
+            setError('');
+            const url = await uploadFile(file, 'mrp_stickers');
+            if (url) {
+                setMrpStickerUrl(url);
+            }
+            setUploadingPdf(false);
+            e.target.value = null;
+        }
+    };
+
+    const handleProductImageUrlChange = (e) => {
+        setProductImageUrl(getGoogleDriveDirectLink(e.target.value));
+    };
+
+    const handleMrpStickerUrlChange = (e) => {
+        setMrpStickerUrl(getGoogleDriveDirectLink(e.target.value));
+    };
+
+    const handleSubmit = async () => {
+        if (!name || !startDate || !estimatedDate) {
+            setError('Project Name, Start Date, and Estimated Date are required.');
+            return;
+        }
+
+        const newProject = {
+            name,
+            category,
+            vendorName,
+            vendorPhone,
+            vendorAddress,
+            projectManager,
+            status,
+            startDate,
+            estimatedDate,
+            reminderDuration: parseInt(reminderDuration, 10),
+            remarks,
+            priority,
+            productSegment,
+            procurementCost: parseFloat(procurementCost) || 0,
+            procurementCurrency,
+            mrp: parseFloat(mrp) || 0,
+            mrpCurrency,
+            barcodeType,
+            barcodeNumber,
+            mrpStickerUrl,
+            productImageUrl,
+            createdAt: project ? project.createdAt : new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+        };
+
+        onSave(newProject);
+        onClose();
+    };
+
+    if (!show) return null;
+
+    const isViewMode = project && !isEditing;
+
+    const getReminderStatus = (estimatedDate, reminderDuration) => {
+        if (!estimatedDate || !reminderDuration) return '';
+        const estimated = new Date(estimatedDate);
+        const today = new Date();
+        const reminderThreshold = new Date(estimated.getTime());
+        reminderThreshold.setDate(estimated.getDate() - reminderDuration);
+
+        today.setHours(0, 0, 0, 0);
+        estimated.setHours(0, 0, 0, 0);
+        reminderThreshold.setHours(0, 0, 0, 0);
+
+        if (today > estimated) {
+            return <span className="text-red-600 font-semibold">Overdue!</span>;
+        } else if (today >= reminderThreshold) {
+            return <span className="text-orange-500 font-semibold">Reminder Due!</span>;
+        }
+        return '';
+    };
+
+    const barcodeTypes = [
+        'EAN-13', 'UPC-A', 'Code 39', 'Code 128', 'QR Code', 'Data Matrix',
+        'ITF', 'Codabar', 'GS1 DataBar', 'PDF417', 'Aztec Code'
+    ];
+
+    return (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-lg overflow-y-auto max-h-[90vh]">
+                <h2 className="text-2xl font-bold mb-4 text-center text-gray-800">
+                    {project ? (isEditing ? 'Edit Project' : 'Project Details') : 'Add New Project'}
+                </h2>
+                {error && <p className="text-red-500 text-sm mb-4">{error}</p>}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label className="block text-gray-700 text-sm font-bold mb-2">Project Name:</label>
+                        <input
+                            type="text"
+                            value={name}
+                            onChange={(e) => setName(e.target.value)}
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                            readOnly={isViewMode}
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-gray-700 text-sm font-bold mb-2">Category:</label>
+                        <select
+                            value={category}
+                            onChange={(e) => setCategory(e.target.value)}
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                            disabled={isViewMode}
+                        >
+                            <option value="NPD">NPD</option>
+                            <option value="Sourcing">Sourcing</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label className="block text-gray-700 text-sm font-bold mb-2">Vendor Name:</label>
+                        <input
+                            type="text"
+                            value={vendorName}
+                            onChange={(e) => setVendorName(e.target.value)}
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                            readOnly={isViewMode}
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-gray-700 text-sm font-bold mb-2">Vendor Phone:</label>
+                        <input
+                            type="text"
+                            value={vendorPhone}
+                            onChange={(e) => setVendorPhone(e.target.value)}
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                            readOnly={isViewMode}
+                        />
+                    </div>
+                    <div className="md:col-span-2">
+                        <label className="block text-gray-700 text-sm font-bold mb-2">Vendor Address:</label>
+                        <textarea
+                            value={vendorAddress}
+                            onChange={(e) => setVendorAddress(e.target.value)}
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100 h-20 resize-y"
+                            readOnly={isViewMode}
+                            placeholder="Enter vendor's full address..."
+                        ></textarea>
+                    </div>
+                    <div>
+                        <label className="block text-gray-700 text-sm font-bold mb-2">Project Manager Name:</label>
+                        <input
+                            type="text"
+                            value={projectManager}
+                            onChange={(e) => setProjectManager(e.target.value)}
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                            readOnly={isViewMode}
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-gray-700 text-sm font-bold mb-2">Status:</label>
+                        <select
+                            value={status}
+                            onChange={(e) => setStatus(e.target.value)}
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                            disabled={isViewMode}
+                        >
+                            <option value="Planning">Planning</option>
+                            <option value="Development">Development</option>
+                            <option value="Completed">Completed</option>
+                            <option value="On Hold">On Hold</option>
+                            <option value="Cancelled">Cancelled</option>
+                            <option value="Delayed">Delayed</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label className="block text-gray-700 text-sm font-bold mb-2">Priority:</label>
+                        <select
+                            value={priority}
+                            onChange={(e) => setPriority(e.target.value)}
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                            disabled={isViewMode}
+                        >
+                            <option value="Urgent">Urgent</option>
+                            <option value="High">High</option>
+                            <option value="Medium-1">Medium-1</option>
+                            <option value="Medium-2">Medium-2</option>
+                            <option value="Low">Low</option>
+                            <option value="Optional">Optional</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label className="block text-gray-700 text-sm font-bold mb-2">Product Segment:</label>
+                        <select
+                            value={productSegment}
+                            onChange={(e) => setProductSegment(e.target.value)}
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                            disabled={isViewMode}
+                        >
+                            <option value="Plastic Storage">Plastic Storage</option>
+                            <option value="Steel Storage">Steel Storage</option>
+                            <option value="Steel Kitchen Tools">Steel Kitchen Tools</option>
+                            <option value="Plastic Kitchen Tools">Plastic Kitchen Tools</option>
+                            <option value="Ceramic">Ceramic</option>
+                            <option value="Stoneware">Stoneware</option>
+                            <option value="PETware">PETware</option>
+                            <option value="PET Bottles">PET Bottles</option>
+                            <option value="Steel Bottles">Steel Bottles</option>
+                        </select>
+                    </div>
+                    <div className="flex items-end gap-2">
+                        <div className="flex-grow">
+                            <label className="block text-gray-700 text-sm font-bold mb-2">Procurement Cost (Ex-Factory Price):</label>
+                            <input
+                                type="number"
+                                step="0.01"
+                                value={procurementCost}
+                                onChange={(e) => setProcurementCost(e.target.value)}
+                                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                                readOnly={isViewMode}
+                            />
+                        </div>
+                        <select
+                            value={procurementCurrency}
+                            onChange={(e) => setProcurementCurrency(e.target.value)}
+                            className="shadow appearance-none border rounded py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                            disabled={isViewMode}
+                        >
+                            <option value="USD">USD</option>
+                            <option value="EUR">EUR</option>
+                            <option value="INR">INR</option>
+                            <option value="GBP">GBP</option>
+                        </select>
+                    </div>
+                    <div className="flex items-end gap-2">
+                        <div className="flex-grow">
+                            <label className="block text-gray-700 text-sm font-bold mb-2">Manual MRP:</label>
+                            <input
+                                type="number"
+                                step="0.01"
+                                value={mrp}
+                                onChange={(e) => setMrp(e.target.value)}
+                                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                                readOnly={isViewMode}
+                            />
+                        </div>
+                        <select
+                            value={mrpCurrency}
+                            onChange={(e) => setMrpCurrency(e.target.value)}
+                            className="shadow appearance-none border rounded py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                            disabled={isViewMode}
+                        >
+                            <option value="USD">USD</option>
+                            <option value="EUR">EUR</option>
+                            <option value="INR">INR</option>
+                            <option value="GBP">GBP</option>
+                        </select>
+                    </div>
+                    <div className="md:col-span-2 flex justify-center gap-4 mt-2">
+                        <a href="https://manzoorathar.github.io/mrp-calculator-app-4/" target="_blank" rel="noopener noreferrer">
+                            <button
+                                type="button"
+                                className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full focus:outline-none focus:shadow-outline transition duration-300 ease-in-out transform hover:scale-105"
+                                disabled={isViewMode}
+                            >
+                                Calculate MRP (External)
+                            </button>
+                        </a>
+                        <a href="https://manzoorathar.github.io/mrp_sticker_Generator_3/" target="_blank" rel="noopener noreferrer">
+                            <button
+                                type="button"
+                                className="bg-indigo-500 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-full focus:outline-none focus:shadow-outline transition duration-300 ease-in-out transform hover:scale-105"
+                                disabled={isViewMode}
+                            >
+                                Generate MRP Sticker (External)
+                            </button>
+                        </a>
+                    </div>
+                    <div>
+                        <label className="block text-gray-700 text-sm font-bold mb-2">Barcode Type:</label>
+                        <select
+                            value={barcodeType}
+                            onChange={(e) => setBarcodeType(e.target.value)}
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                            disabled={isViewMode}
+                        >
+                            {barcodeTypes.map(type => (
+                                <option key={type} value={type}>{type}</option>
+                            ))}
+                        </select>
+                    </div>
+                    <div>
+                        <label className="block text-gray-700 text-sm font-bold mb-2">Barcode Number:</label>
+                        <input
+                            type="text"
+                            value={barcodeNumber}
+                            onChange={(e) => setBarcodeNumber(e.target.value)}
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                            readOnly={isViewMode}
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-gray-700 text-sm font-bold mb-2">Start Date:</label>
+                        <input
+                            type="date"
+                            value={startDate}
+                            onChange={(e) => setStartDate(e.target.value)}
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                            readOnly={isViewMode}
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-gray-700 text-sm font-bold mb-2">Estimated Date of Submission:</label>
+                        <input
+                            type="date"
+                            value={estimatedDate}
+                            onChange={(e) => setEstimatedDate(e.target.value)}
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                            readOnly={isViewMode}
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-gray-700 text-sm font-bold mb-2">Reminder Duration (days):</label>
+                        <input
+                            type="number"
+                            value={reminderDuration}
+                            onChange={(e) => setReminderDuration(e.target.value)}
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                            readOnly={isViewMode}
+                        />
+                    </div>
+                    <div className="md:col-span-2 border rounded-lg p-3 bg-gray-50">
+                        <label className="block text-gray-700 text-sm font-bold mb-2">MRP Sticker (PDF):</label>
+                        {!isViewMode && (
+                            <>
+                                <div className="mb-2">
+                                    <label htmlFor="mrp-sticker-upload" className="block text-gray-600 text-xs mb-1">Upload from computer:</label>
+                                    <input
+                                        id="mrp-sticker-upload"
+                                        type="file"
+                                        accept="application/pdf"
+                                        onChange={handleMrpStickerUpload}
+                                        className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-violet-50 file:text-violet-700 hover:file:bg-violet-100"
+                                        disabled={uploadingPdf}
+                                    />
+                                    {uploadingPdf && <p className="text-blue-500 text-sm mt-2">Uploading PDF...</p>}
+                                </div>
+                                <div className="mb-2">
+                                    <label htmlFor="mrp-sticker-url" className="block text-gray-600 text-xs mb-1">Or enter URL:</label>
+                                    <input
+                                        id="mrp-sticker-url"
+                                        type="text"
+                                        value={mrpStickerUrl}
+                                        onChange={handleMrpStickerUrlChange}
+                                        className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                                        placeholder="Enter URL for MRP sticker PDF"
+                                        disabled={uploadingPdf}
+                                    />
+                                </div>
+                            </>
+                        )}
+                        {mrpStickerUrl && (
+                            <p className="mt-2">
+                                <a href={mrpStickerUrl} target="_blank" rel="noopener noreferrer" className="text-blue-500 hover:underline font-medium">
+                                    View Uploaded MRP Sticker
+                                </a>
+                            </p>
+                        )}
+                        {isViewMode && !mrpStickerUrl && <p className="text-gray-500 text-sm mt-2">No MRP Sticker uploaded.</p>}
+                    </div>
+                    <div className="md:col-span-2 border rounded-lg p-3 bg-gray-50">
+                        <label className="block text-gray-700 text-sm font-bold mb-2">Product Image:</label>
+                        {!isViewMode && (
+                            <>
+                                <div className="mb-2">
+                                    <label htmlFor="product-image-upload" className="block text-gray-600 text-xs mb-1">Upload from computer:</label>
+                                    <input
+                                        id="product-image-upload"
+                                        type="file"
+                                        accept="image/*"
+                                        onChange={handleProductImageUpload}
+                                        className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-violet-50 file:text-violet-700 hover:file:bg-violet-100"
+                                        disabled={uploadingImage}
+                                    />
+                                    {uploadingImage && <p className="text-blue-500 text-sm mt-2">Uploading image...</p>}
+                                </div>
+                                <div className="mb-2">
+                                    <label htmlFor="product-image-url" className="block text-gray-600 text-xs mb-1">Or enter URL:</label>
+                                    <input
+                                        id="product-image-url"
+                                        type="text"
+                                        value={productImageUrl}
+                                        onChange={handleProductImageUrlChange}
+                                        className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                                        placeholder="Enter URL for product image"
+                                        disabled={uploadingImage}
+                                    />
+                                </div>
+                            </>
+                        )}
+                        {productImageUrl && (
+                            <img
+                                src={productImageUrl}
+                                alt="Product Preview"
+                                className="w-32 h-32 object-contain rounded-md mt-2 border border-gray-300"
+                                onError={(e) => { e.target.onerror = null; e.target.src = "https://placehold.co/128x128/cccccc/000000?text=No+Img"; }}
+                            />
+                        )}
+                        {isViewMode && !productImageUrl && <p className="text-gray-500 text-sm mt-2">No Product Image uploaded.</p>}
+                    </div>
+                    <div className="md:col-span-2">
+                        <label className="block text-gray-700 text-sm font-bold mb-2">Remarks:</label>
+                        <textarea
+                            value={remarks}
+                            onChange={(e) => setRemarks(e.target.value)}
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100 h-24 resize-y"
+                            readOnly={isViewMode}
+                            placeholder="Add any relevant remarks here..."
+                        ></textarea>
+                    </div>
+                </div>
+                {project && (
+                    <div className="mt-4 text-center text-lg font-medium">
+                        Reminder Status: {getReminderStatus(project.estimatedDate, project.reminderDuration)}
+                    </div>
+                )}
+                <div className="flex items-center justify-end mt-6 space-x-4">
+                    {isViewMode && (
+                        <button
+                            onClick={onEditRequest}
+                            className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full focus:outline-none focus:shadow-outline transition duration-300 ease-in-out transform hover:scale-105"
+                        >
+                            Edit Project
+                        </button>
+                    )}
+                    {(isEditing || !project) && (
+                        <button
+                            onClick={handleSubmit}
+                            className="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-full focus:outline-none focus:shadow-outline transition duration-300 ease-in-out transform hover:scale-105"
+                        >
+                            Save Project
+                        </button>
+                    )}
+                    <button
+                        onClick={onClose}
+                        className="bg-gray-500 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-full focus:outline-none focus:shadow-outline transition duration-300 ease-in-out transform hover:scale-105"
+                    >
+                        {isViewMode ? 'Close' : 'Cancel'}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// ConfirmationModal Component
+const ConfirmationModal = ({ show, message, onConfirm, onCancel }) => {
+    if (!show) return null;
+
+    return (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-sm text-center">
+                <p className="text-lg font-semibold mb-6 text-gray-800">{message}</p>
+                <div className="flex justify-center space-x-4">
+                    <button
+                        onClick={onConfirm}
+                        className="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-full focus:outline-none focus:shadow-outline transition duration-300 ease-in-out transform hover:scale-105"
+                    >
+                        Confirm
+                    </button>
+                    <button
+                        onClick={onCancel}
+                        className="bg-gray-500 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-full focus:outline-none focus:shadow-outline transition duration-300 ease-in-out transform hover:scale-105"
+                    >
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// PasscodeModal Component
+const PasscodeModal = ({ show, onVerify, onCancel, actionType, userPins, onSetPins, onForgotPin }) => {
+    const [passcode, setPasscode] = useState('');
+    const [error, setError] = useState('');
+    const [showSetPins, setShowSetPins] = useState(false);
+    const [newEditPin, setNewEditPin] = useState('');
+    const [newDeletePin, setNewDeletePin] = useState('');
+    const [setPinError, setSetPinError] = useState('');
+
+    useEffect(() => {
+        if (show) {
+            setPasscode('');
+            setError('');
+            setShowSetPins(false); // Reset when modal opens
+            setNewEditPin('');
+            setNewDeletePin('');
+            setSetPinError('');
+        }
+    }, [show]);
+
+    const handleVerify = () => {
+        const correctPin = actionType === 'delete' ? userPins.deletePin : userPins.editPin;
+        if (passcode === correctPin) {
+            onVerify();
+            setPasscode('');
+            setError('');
+        } else {
+            setError('Incorrect passcode. Please try again.');
+        }
+    };
+
+    const handleSetNewPins = () => {
+        if (!newEditPin || !newDeletePin || newEditPin.length !== 4 || newDeletePin.length !== 4 || !/^\d+$/.test(newEditPin) || !/^\d+$/.test(newDeletePin)) {
+            setSetPinError('Both PINs must be 4-digit numbers.');
+            return;
+        }
+        onSetPins(newEditPin, newDeletePin);
+        setShowSetPins(false);
+        setNewEditPin('');
+        setNewDeletePin('');
+        setSetPinError('');
+        onCancel(); // Close the modal after setting pins
+    };
+
+    if (!show) return null;
+
+    return (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-sm">
+                {!showSetPins ? (
+                    <>
+                        <h2 className="text-xl font-bold mb-4 text-center text-gray-800">Enter Passcode to {actionType}</h2>
+                        {error && <p className="text-red-500 text-sm mb-4">{error}</p>}
+                        <input
+                            type="password"
+                            value={passcode}
+                            onChange={(e) => setPasscode(e.target.value)}
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline mb-4"
+                            placeholder="Enter passcode"
+                            maxLength="4"
+                        />
+                        <div className="flex justify-center space-x-4">
+                            <button
+                                onClick={handleVerify}
+                                className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full focus:outline-none focus:shadow-outline transition duration-300 ease-in-out transform hover:scale-105"
+                            >
+                                Verify
+                            </button>
+                            <button
+                                onClick={() => { onCancel(); setPasscode(''); setError(''); }}
+                                className="bg-gray-500 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-full focus:outline-none focus:shadow-outline transition duration-300 ease-in-out transform hover:scale-105"
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                        <button
+                            onClick={() => onForgotPin(setShowSetPins)} // Pass setter to allow parent to control
+                            className="mt-4 text-blue-500 hover:underline text-sm w-full text-center"
+                        >
+                            Forgot PIN?
+                        </button>
+                    </>
+                ) : (
+                    <>
+                        <h2 className="text-xl font-bold mb-4 text-center text-gray-800">Set New PINs</h2>
+                        {setPinError && <p className="text-red-500 text-sm mb-4">{setPinError}</p>}
+                        <div className="mb-4">
+                            <label className="block text-gray-700 text-sm font-bold mb-2">New Edit PIN (4 digits):</label>
+                            <input
+                                type="password"
+                                value={newEditPin}
+                                onChange={(e) => setNewEditPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                                maxLength="4"
+                            />
+                        </div>
+                        <div className="mb-4">
+                            <label className="block text-gray-700 text-sm font-bold mb-2">New Delete PIN (4 digits):</label>
+                            <input
+                                type="password"
+                                value={newDeletePin}
+                                onChange={(e) => setNewDeletePin(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
+                                maxLength="4"
+                            />
+                        </div>
+                        <div className="flex justify-center space-x-4">
+                            <button
+                                onClick={handleSetNewPins}
+                                className="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-full focus:outline-none focus:shadow-outline transition duration-300 ease-in-out transform hover:scale-105"
+                            >
+                                Save New PINs
+                            </button>
+                            <button
+                                onClick={() => { onCancel(); setShowSetPins(false); setSetPinError(''); }}
+                                className="bg-gray-500 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-full focus:outline-none focus:shadow-outline transition duration-300 ease-in-out transform hover:scale-105"
+                            >
+                                Cancel
+                            </button>
+                        </div>
+                        <p className="text-sm text-gray-600 mt-4 text-center">
+                            For a production app, a "Forgot PIN" feature would typically involve sending an OTP to your registered email via a secure backend service. This demo simulates a reset by allowing you to set new PINs after re-authenticating.
+                        </p>
+                    </>
+                )}
+            </div>
+        </div>
+    );
+};
+
+
+// ReportOptionsModal Component
+const ReportOptionsModal = ({ show, onClose, onExportJson, onViewPrintable }) => {
+    if (!show) return null;
+
+    return (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center p-4 z-50">
+            <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-md text-center">
+                <h2 className="text-2xl font-bold mb-6 text-gray-800">Generate Report</h2>
+                <p className="text-gray-700 mb-6">
+                    Direct PPT export is not supported. Please choose one of the following options:
+                </p>
+                <div className="flex flex-col space-y-4">
+                    <button
+                        onClick={onExportJson}
+                        className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-full focus:outline-none focus:shadow-outline transition duration-300 ease-in-out transform hover:scale-105"
+                    >
+                        Export Data (JSON)
+                    </button>
+                    <button
+                        onClick={onViewPrintable}
+                        className="bg-green-500 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-full focus:outline-none focus:shadow-outline transition duration-300 ease-in-out transform hover:scale-105"
+                    >
+                        View Printable Report
+                    </button>
+                    <button
+                        onClick={onClose}
+                        className="bg-gray-500 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-full focus:outline-none focus:shadow-outline transition duration-300 ease-in-out transform hover:scale-105"
+                    >
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// PrintableReportView Component
+const PrintableReportView = ({ show, onClose, projects, statusData, priorityData, statusColors, priorityColors }) => {
+    if (!show) return null;
+
+    return (
+        <div className="fixed inset-0 bg-gray-100 overflow-y-auto z-50 p-4">
+            <div className="max-w-4xl mx-auto bg-white rounded-xl shadow-2xl p-6 sm:p-8 print:shadow-none print:rounded-none print:p-0">
+                <div className="flex justify-between items-center mb-6 print:hidden">
+                    <h2 className="text-3xl font-bold text-gray-800">Printable Project Report</h2>
+                    <button
+                        onClick={window.print}
+                        className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full focus:outline-none focus:shadow-outline transition duration-300 ease-in-out transform hover:scale-105"
+                    >
+                        Print / Save as PDF
+                    </button>
+                    <button
+                        onClick={onClose}
+                        className="bg-gray-500 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-full focus:outline-none focus:shadow-outline transition duration-300 ease-in-out transform hover:scale-105"
+                    >
+                        Close
+                    </button>
+                </div>
+
+                <h1 className="text-3xl font-extrabold text-center text-gray-900 mb-8 print:text-2xl print:mb-4">
+                    Product Development Report
+                </h1>
+
+                {/* Charts Section */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8 print:grid-cols-1 print:gap-4">
+                    <div className="bg-white p-4 rounded-lg shadow-md flex flex-col items-center print:shadow-none print:border print:border-gray-300">
+                        <h3 className="text-xl font-semibold text-gray-800 mb-4 print:text-lg">Projects by Status</h3>
+                        <ResponsiveContainer width="100%" height={250}>
+                            <PieChart>
+                                <Pie
+                                    data={statusData}
+                                    cx="50%"
+                                    cy="50%"
+                                    outerRadius={80}
+                                    fill="#8884d8"
+                                    dataKey="value"
+                                    labelLine={false}
+                                    label={({ name, percent }) => `${name} (${(percent * 100).toFixed(0)}%)`}
+                                >
+                                    {statusData.map((entry, index) => (
+                                        <Cell key={`cell-${index}`} fill={statusColors[index % statusColors.length]} />
+                                    ))}
+                                </Pie>
+                                <Tooltip />
+                                <Legend />
+                            </PieChart>
+                        </ResponsiveContainer>
+                    </div>
+
+                    <div className="bg-white p-4 rounded-lg shadow-md flex flex-col items-center print:shadow-none print:border print:border-gray-300">
+                        <h3 className="text-xl font-semibold text-gray-800 mb-4 print:text-lg">Projects by Priority</h3>
+                        <ResponsiveContainer width="100%" height={250}>
+                            <PieChart>
+                                <Pie
+                                    data={priorityData}
+                                    cx="50%"
+                                    cy="50%"
+                                    outerRadius={80}
+                                    fill="#8884d8"
+                                    dataKey="value"
+                                    labelLine={false}
+                                    label={({ name, percent }) => `${name} (${(percent * 100).toFixed(0)}%)`}
+                                >
+                                    {priorityData.map((entry, index) => (
+                                        <Cell key={`cell-${index}`} fill={priorityColors[index % priorityColors.length]} />
+                                    ))}
+                                </Pie>
+                                <Tooltip />
+                                <Legend />
+                            </PieChart>
+                        </ResponsiveContainer>
+                    </div>
+                </div>
+
+                {/* Project List */}
+                <h2 className="text-2xl font-semibold text-gray-800 mb-4 print:text-xl">Project Details</h2>
+                {projects.length === 0 ? (
+                    <p className="text-center text-gray-600 text-lg py-10">No projects to display in the report.</p>
+                ) : (
+                    <div className="space-y-4">
+                        {projects.map((project) => (
+                            <div key={project.id} className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm flex flex-col sm:flex-row print:border print:border-gray-200 print:shadow-none print:rounded-none print:p-2">
+                                <div className="flex-grow">
+                                    <h3 className="text-lg font-bold text-blue-700 mb-1 print:text-base">{project.name}</h3>
+                                    <div className="text-sm text-gray-600 space-y-0.5 print:text-xs">
+                                        {project.projectManager && <p><span className="font-medium">Project Manager:</span> {project.projectManager}</p>}
+                                        {project.vendorName && <p><span className="font-medium">Vendor Name:</span> {project.vendorName}</p>}
+                                        <p><span className="font-medium">MRP:</span> {project.mrpCurrency} {project.mrp}</p>
+                                        <p><span className="font-medium">Estimated Submission Date:</span> {project.estimatedDate}</p>
+                                        <p><span className="font-medium">Status:</span> <span className={`font-semibold ${
+                                            project.status === 'Completed' ? 'text-green-600' :
+                                            project.status === 'Cancelled' ? 'text-red-600' :
+                                            project.status === 'On Hold' ? 'text-yellow-600' :
+                                            project.status === 'Delayed' ? 'text-red-700' :
+                                            'text-blue-600'
+                                        }`}>{project.status}</span></p>
+                                        <p><span className="font-medium">Priority:</span> <span className={`font-semibold ${
+                                            project.priority === 'Urgent' ? 'text-red-800' :
+                                            project.priority === 'High' ? 'text-orange-700' :
+                                            project.priority === 'Medium-1' ? 'text-green-700' :
+                                            project.priority === 'Medium-2' ? 'text-blue-700' :
+                                            'text-gray-700'
+                                        }`}>{project.priority}</span></p>
+                                        {project.mrpStickerUrl && (
+                                            <p>
+                                                <a
+                                                    href={project.mrpStickerUrl}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="text-blue-500 hover:underline font-medium"
+                                                >
+                                                    View MRP Sticker (PDF)
+                                                </a>
+                                            </p>
+                                        )}
+                                        {project.remarks && <p><span className="font-medium">Remarks:</span> {project.remarks}</p>}
+                                    </div>
+                                </div>
+                                {project.productImageUrl && (
+                                    <div className="flex-shrink-0 mt-4 sm:mt-0 sm:ml-4 print:ml-2">
+                                        <img
+                                            src={project.productImageUrl}
+                                            alt="Product"
+                                            className="w-24 h-24 object-cover rounded-md border border-gray-300 print:w-20 print:h-20"
+                                            onError={(e) => { e.target.onerror = null; e.target.src = "https://placehold.co/96x96/cccccc/000000?text=No+Img"; }}
+                                        />
+                                    </div>
+                                )}
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
+
+
+// Main App Component
+const App = () => {
+    const [projects, setProjects] = useState([]);
+    const [showAddModal, setShowAddModal] = useState(false);
+    const [showDetailModal, setShowDetailModal] = useState(false);
+    const [selectedProject, setSelectedProject] = useState(null);
+    const [isEditing, setIsEditing] = useState(false);
+    const [showConfirmDeleteModal, setShowConfirmDeleteModal] = useState(false);
+    const [projectToDeleteId, setProjectToDeleteId] = useState(null);
+    const [showPasscodeModal, setShowPasscodeModal] = useState(false);
+    const [passcodeActionType, setPasscodeActionType] = useState('');
+    const [filteredStatus, setFilteredStatus] = useState(null);
+    const [filteredPriority, setFilteredPriority] = useState(null);
+    const [filteredCategory, setFilteredCategory] = useState('All');
+    const [searchTerm, setSearchTerm] = useState('');
+    const [sortOption, setSortOption] = useState('none');
+
+    const [showImageEnlargeModal, setShowImageEnlargeModal] = useState(false);
+    const [enlargedImageUrl, setEnlargedImageUrl] = useState('');
+
+    const [showReportOptionsModal, setShowReportOptionsModal] = useState(false);
+    const [showPrintableReport, setShowPrintableReport] = useState(false);
+
+    const [db, setDb] = useState(null);
+    const [auth, setAuth] = useState(null);
+    const [storage, setStorage] = useState(null);
+    const [userId, setUserId] = useState(null);
+    const [userEmail, setUserEmail] = useState(null); // New: User email
+    const [userDisplayName, setUserDisplayName] = useState(null); // New: User display name
+    const [userPins, setUserPins] = useState({ editPin: '1234', deletePin: '2345' }); // Default PINs, will be overwritten by user settings
+    const [isAuthReady, setIsAuthReady] = useState(false);
+    const [showInitialPinSetup, setShowInitialPinSetup] = useState(false); // State for initial PIN setup
+
+    // Firebase Initialization and Auth
+    useEffect(() => {
+        try {
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+
+            if (Object.keys(firebaseConfig).length === 0) {
+                console.error("Firebase config is missing. Cannot initialize Firebase.");
+                return;
+            }
+
+            const app = initializeApp(firebaseConfig);
+            const firestore = getFirestore(app);
+            const firebaseAuth = getAuth(app);
+            const firebaseStorage = getStorage(app);
+
+            setDb(firestore);
+            setAuth(firebaseAuth);
+            setStorage(firebaseStorage);
+
+            const unsubscribe = onAuthStateChanged(firebaseAuth, async (user) => {
+                if (user) {
+                    setUserId(user.uid);
+                    setUserEmail(user.email);
+                    setUserDisplayName(user.displayName);
+                    setIsAuthReady(true);
+                    // Fetch user-specific PINs
+                    await fetchUserPins(user.uid, firestore);
+                } else {
+                    // Sign in anonymously if no user is authenticated
+                    try {
+                        if (typeof __initial_auth_token !== 'undefined') {
+                            await signInWithCustomToken(firebaseAuth, __initial_auth_token);
+                        } else {
+                            await signInAnonymously(firebaseAuth);
+                        }
+                    } catch (error) {
+                        console.error("Error signing in anonymously:", error);
+                    }
+                }
+            });
+
+            return () => unsubscribe();
+        } catch (error) {
+            console.error("Error initializing Firebase:", error);
+        }
+    }, []);
+
+    // Fetch user-specific PINs
+    const fetchUserPins = async (uid, firestore) => {
+        if (!uid || !firestore) return;
+        const userSettingsRef = doc(firestore, `artifacts/${__app_id}/users/${uid}/settings/pins`);
+        try {
+            const docSnap = await getDoc(userSettingsRef);
+            if (docSnap.exists()) {
+                setUserPins(docSnap.data());
+            } else {
+                // If no pins exist, prompt user to set them
+                setShowInitialPinSetup(true);
+            }
+        } catch (error) {
+            console.error("Error fetching user pins:", error);
+        }
+    };
+
+    // Save user-specific PINs
+    const saveUserPins = async (editPin, deletePin) => {
+        if (!db || !userId) {
+            console.error("Firestore not initialized or user not authenticated.");
+            return;
+        }
+        const userSettingsRef = doc(db, `artifacts/${__app_id}/users/${userId}/settings/pins`);
+        try {
+            await setDoc(userSettingsRef, { editPin, deletePin }, { merge: true });
+            setUserPins({ editPin, deletePin });
+            console.log("User PINs saved successfully.");
+        } catch (error) {
+            console.error("Error saving user pins:", error);
+        }
+    };
+
+    // Google Sign-In handler
+    const handleGoogleSignIn = async () => {
+        if (!auth) return;
+        const provider = new GoogleAuthProvider();
+        try {
+            await signInWithPopup(auth, provider);
+            // onAuthStateChanged will handle setting userId, email, etc.
+        } catch (error) {
+            console.error("Error during Google Sign-In:", error);
+            // Handle specific errors, e.g., popup closed by user
+        }
+    };
+
+    // Sign Out handler
+    const handleSignOut = async () => {
+        if (!auth) return;
+        try {
+            await signOut(auth);
+            setUserId(null);
+            setUserEmail(null);
+            setUserDisplayName(null);
+            setUserPins({ editPin: '1234', deletePin: '2345' }); // Reset to default
+            setProjects([]); // Clear projects on sign out
+            setIsAuthReady(false);
+            // Optionally, re-sign in anonymously if you want to keep data for anonymous users
+            // await signInAnonymously(auth);
+        } catch (error) {
+            console.error("Error during sign out:", error);
+        }
+    };
+
+    // Handle Forgot PIN flow
+    const handleForgotPin = async (setShowSetPinsCallback) => {
+        if (!auth || !auth.currentUser) {
+            console.error("No authenticated user to reset PIN for.");
+            return;
+        }
+        // Simulate re-authentication for security before setting new PINs
+        // In a real app, this would trigger an email OTP.
+        // Here, we just ask them to re-authenticate with Google.
+        try {
+            const provider = new GoogleAuthProvider();
+            await signInWithPopup(auth, provider);
+            // If re-authentication is successful, allow setting new pins
+            setShowSetPinsCallback(true);
+        } catch (error) {
+            console.error("Error during re-authentication for PIN reset:", error);
+            alert("Failed to re-authenticate. Please try again or contact support if this persists.");
+        }
+    };
+
+
+    // Fetch projects when auth is ready and userId is set
+    useEffect(() => {
+        if (!isAuthReady || !db || !userId) return;
+
+        const projectsCollectionRef = collection(db, `artifacts/${__app_id}/users/${userId}/projects`);
+        const unsubscribe = onSnapshot(projectsCollectionRef, (snapshot) => {
+            const projectsData = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data()
+            }));
+            const processedProjects = projectsData.map(project => ({
+                ...project,
+                mrpStickerUrl: getGoogleDriveDirectLink(project.mrpStickerUrl),
+                productImageUrl: getGoogleDriveDirectLink(project.productImageUrl)
+            }));
+            setProjects(processedProjects);
+        }, (error) => {
+            console.error("Error fetching projects:", error);
+        });
+
+        return () => unsubscribe();
+    }, [isAuthReady, db, userId]);
+
+    const handleAddProject = () => {
+        setSelectedProject(null);
+        setIsEditing(false);
+        setShowAddModal(true);
+    };
+
+    const handleSaveNewProject = async (newProject) => {
+        if (!db || !userId) {
+            console.error("Firestore not initialized or user not authenticated.");
+            return;
+        }
+        try {
+            const projectsCollectionRef = collection(db, `artifacts/${__app_id}/users/${userId}/projects`);
+            await addDoc(projectsCollectionRef, newProject);
+            setShowAddModal(false);
+        } catch (e) {
+            console.error("Error adding document: ", e);
+        }
+    };
+
+    const handleViewProject = (project) => {
+        setSelectedProject(project);
+        setIsEditing(false);
+        setShowDetailModal(true);
+    };
+
+    const handleEditProjectRequest = () => {
+        setPasscodeActionType('edit');
+        setShowPasscodeModal(true);
+    };
+
+    const handleVerifyEditPasscode = () => {
+        setIsEditing(true);
+        setShowPasscodeModal(false);
+    };
+
+    const handleUpdateProject = async (updatedProject) => {
+        if (!db || !userId || !selectedProject?.id) {
+            console.error("Firestore not initialized or project ID missing.");
+            return;
+        }
+        try {
+            const projectDocRef = doc(db, `artifacts/${__app_id}/users/${userId}/projects`, selectedProject.id);
+            await updateDoc(projectDocRef, updatedProject);
+            setShowDetailModal(false);
+            setIsEditing(false);
+            setSelectedProject(null);
+        } catch (e) {
+            console.error("Error updating document: ", e);
+        }
+    };
+
+    const handleDeleteProject = (id) => {
+        setProjectToDeleteId(id);
+        setShowConfirmDeleteModal(true);
+    };
+
+    const handleConfirmDelete = () => {
+        setShowConfirmDeleteModal(false);
+        setPasscodeActionType('delete');
+        setShowPasscodeModal(true);
+    };
+
+    const handleVerifyDeletePasscode = async () => {
+        if (!db || !userId || !projectToDeleteId) {
+            console.error("Firestore not initialized or project ID missing for deletion.");
+            return;
+        }
+        try {
+            const projectDocRef = doc(db, `artifacts/${__app_id}/users/${userId}/projects`, projectToDeleteId);
+            await deleteDoc(projectDocRef);
+            setProjectToDeleteId(null);
+            setShowPasscodeModal(false);
+        } catch (e) {
+            console.error("Error deleting document: ", e);
+        }
+    };
+
+    const handleCancelPasscode = () => {
+        setShowPasscodeModal(false);
+        setPasscodeActionType('');
+        setProjectToDeleteId(null);
+    };
+
+    const getReminderMessage = (project) => {
+        if (!project.estimatedDate || !project.reminderDuration) return null;
+
+        const estimated = new Date(project.estimatedDate);
+        const today = new Date();
+        const reminderThreshold = new Date(estimated.getTime());
+        reminderThreshold.setDate(estimated.getDate() - project.reminderDuration);
+
+        today.setHours(0, 0, 0, 0);
+        estimated.setHours(0, 0, 0, 0);
+        reminderThreshold.setHours(0, 0, 0, 0);
+
+        if (today.getTime() === estimated.getTime()) {
+            return <span className="text-purple-600 font-semibold">Due Today!</span>;
+        } else if (today > estimated) {
+            return <span className="text-red-600 font-semibold">Overdue!</span>;
+        } else if (today >= reminderThreshold) {
+            const daysLeft = Math.ceil((estimated.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+            return <span className="text-orange-500 font-semibold">Due in {daysLeft} days!</span>;
+        }
+        return null;
+    };
+
+    const getProjectStatusCounts = (projs) => {
+        const counts = {};
+        projs.forEach(project => {
+            counts[project.status] = (counts[project.status] || 0) + 1;
+        });
+        return Object.keys(counts).map(status => ({
+            name: status,
+            value: counts[status]
+        }));
+    };
+
+    const getProjectPriorityCounts = (projs) => {
+        const counts = {};
+        projs.forEach(project => {
+            counts[project.priority] = (counts[project.priority] || 0) + 1;
+        });
+        return Object.keys(counts).map(priority => ({
+            name: priority,
+            value: counts[priority]
+        }));
+    };
+
+    const STATUS_COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8', '#D32F2F'];
+    const PRIORITY_COLORS = ['#E53E3E', '#DD6B20', '#38A169', '#3182CE', '#A0AEC0', '#6B46C1'];
+
+    const renderActiveShape = (props, filterSetter, allText) => {
+        const RADIAN = Math.PI / 180;
+        const { cx, cy, midAngle, innerRadius, outerRadius, startAngle, endAngle, fill, payload, percent, value } = props;
+        const sin = Math.sin(-RADIAN * midAngle);
+        const cos = Math.cos(-RADIAN * midAngle);
+        const sx = cx + (outerRadius + 10) * cos;
+        const sy = cy + (outerRadius + 10) * sin;
+        const mx = cx + (outerRadius + 30) * cos;
+        const my = cy + (outerRadius + 30) * sin;
+        const ex = mx + (cos >= 0 ? 1 : -1) * 22;
+        const ey = my;
+        const textAnchor = cos >= 0 ? 'start' : 'end';
+
+        return (
+            <g>
+                <text x={cx} y={cy} dy={8} textAnchor="middle" fill="#333" className="font-bold text-lg cursor-pointer" onClick={() => filterSetter(null)}>
+                    {allText}
+                </text>
+                <Sector
+                    cx={cx}
+                    cy={cy}
+                    innerRadius={innerRadius}
+                    outerRadius={outerRadius}
+                    startAngle={startAngle}
+                    endAngle={endAngle}
+                    fill={fill}
+                />
+                <Sector
+                    cx={cx}
+                    cy={cy}
+                    startAngle={startAngle}
+                    endAngle={endAngle}
+                    innerRadius={outerRadius + 6}
+                    outerRadius={outerRadius + 10}
+                    fill={fill}
+                />
+                <path d={`M${sx},${sy}L${mx},${my}L${ex},${ey}`} stroke={fill} fill="none" />
+                <circle cx={ex} cy={ey} r={3} fill={fill} stroke="none" />
+                <text x={ex + (cos >= 0 ? 1 : -1) * 12} y={ey} textAnchor={textAnchor} fill="#333">{`${payload.name} (${value})`}</text>
+                <text x={ex + (cos >= 0 ? 1 : -1) * 12} y={ey} dy={18} textAnchor={textAnchor} fill="#999">
+                    {`(${(percent * 100).toFixed(2)}%)`}
+                </text>
+            </g>
+        );
+    };
+
+    const getFilteredAndSortedProjects = () => {
+        let currentProjects = projects;
+
+        if (filteredStatus) {
+            currentProjects = currentProjects.filter(project => project.status === filteredStatus);
+        }
+        if (filteredPriority) {
+            currentProjects = currentProjects.filter(project => project.priority === filteredPriority);
+        }
+        if (filteredCategory !== 'All') {
+            currentProjects = currentProjects.filter(project => project.category === filteredCategory);
+        }
+        if (searchTerm) {
+            const lowerCaseSearchTerm = searchTerm.toLowerCase();
+            currentProjects = currentProjects.filter(project =>
+                project.name.toLowerCase().includes(lowerCaseSearchTerm) ||
+                (project.projectManager && project.projectManager.toLowerCase().includes(lowerCaseSearchTerm)) ||
+                (project.vendorName && project.vendorName.toLowerCase().includes(lowerCaseSearchTerm))
+            );
+        }
+
+        const priorityOrder = {
+            'Urgent': 1,
+            'High': 2,
+            'Medium-1': 3,
+            'Medium-2': 4,
+            'Low': 5,
+            'Optional': 6
+        };
+
+        switch (sortOption) {
+            case 'startDate':
+                currentProjects.sort((a, b) => new Date(a.startDate) - new Date(b.startDate));
+                break;
+            case 'submissionDate':
+                currentProjects.sort((a, b) => new Date(a.estimatedDate) - new Date(b.estimatedDate));
+                break;
+            case 'projectNumber':
+                currentProjects.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+                break;
+            case 'priority':
+                currentProjects.sort((a, b) => {
+                    const priorityA = priorityOrder[a.priority] || 99;
+                    const priorityB = priorityOrder[b.priority] || 99;
+                    return priorityA - priorityB;
+                });
+                break;
+            default:
+                break;
+        }
+        return currentProjects;
+    };
+
+    const displayedProjects = getFilteredAndSortedProjects();
+    const statusData = getProjectStatusCounts(displayedProjects);
+    const priorityData = getProjectPriorityCounts(displayedProjects);
+
+    const handleImageClick = (imageUrl) => {
+        setEnlargedImageUrl(imageUrl);
+        setShowImageEnlargeModal(true);
+    };
+
+    const handleExportDataAsJson = () => {
+        const dataToExport = displayedProjects.map(project => ({
+            ...project,
+            id: undefined,
+            createdAt: undefined,
+            updatedAt: undefined
+        }));
+        const jsonString = JSON.stringify(dataToExport, null, 2);
+        const blob = new Blob([jsonString], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'product_development_report.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        setShowReportOptionsModal(false);
+    };
+
+    const handleViewPrintableReport = () => {
+        setShowPrintableReport(true);
+        setShowReportOptionsModal(false);
+    };
+
+    if (!isAuthReady) {
+        return (
+            <div className="flex items-center justify-center min-h-screen bg-gray-100">
+                <div className="text-xl font-semibold text-gray-700">Loading application...</div>
+            </div>
+        );
+    }
+
+    return (
+        <FirebaseContext.Provider value={{ db, auth, userId, storage }}>
+            <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4 sm:p-6 font-inter">
+                <div className="max-w-4xl mx-auto bg-white rounded-xl shadow-2xl p-6 sm:p-8">
+                    <h1 className="text-4xl font-extrabold text-center text-gray-900 mb-8">
+                        Product Development Management
+                    </h1>
+
+                    <div className="bg-gray-50 p-4 rounded-lg shadow-inner mb-6">
+                        <p className="text-sm text-gray-600">
+                            Your User ID: <span className="font-mono text-blue-700 break-all">{userId}</span>
+                        </p>
+                        {userEmail && (
+                            <p className="text-sm text-gray-600">
+                                Logged in as: <span className="font-semibold text-blue-700">{userDisplayName || userEmail}</span>
+                            </p>
+                        )}
+                        <div className="mt-4 flex flex-wrap gap-2">
+                            {userEmail ? (
+                                <button
+                                    onClick={handleSignOut}
+                                    className="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-full text-sm transition duration-300"
+                                >
+                                    Sign Out
+                                </button>
+                            ) : (
+                                <button
+                                    onClick={handleGoogleSignIn}
+                                    className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full text-sm transition duration-300"
+                                >
+                                    Sign In with Google
+                                </button>
+                            )}
+                            {/* Option to change PINs after initial setup */}
+                            {userId && !showInitialPinSetup && (
+                                <button
+                                    onClick={() => { setPasscodeActionType('edit'); setShowPasscodeModal(true); }}
+                                    className="bg-orange-500 hover:bg-orange-700 text-white font-bold py-2 px-4 rounded-full text-sm transition duration-300"
+                                >
+                                    Change PINs
+                                </button>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+                        {/* Status Pie Chart */}
+                        <div className="bg-white p-4 rounded-lg shadow-md flex flex-col items-center">
+                            <h3 className="text-xl font-semibold text-gray-800 mb-4">Projects by Status</h3>
+                            <ResponsiveContainer width="100%" height={300}>
+                                <PieChart>
+                                    <Pie
+                                        data={statusData}
+                                        cx="50%"
+                                        cy="50%"
+                                        innerRadius={60}
+                                        outerRadius={90}
+                                        fill="#8884d8"
+                                        paddingAngle={5}
+                                        dataKey="value"
+                                        activeIndex={filteredStatus ? statusData.findIndex(d => d.name === filteredStatus) : -1}
+                                        activeShape={(props) => renderActiveShape(props, setFilteredStatus, 'All Projects')}
+                                        onClick={(data) => setFilteredStatus(data.name)}
+                                    >
+                                        {statusData.map((entry, index) => (
+                                            <Cell key={`status-cell-${index}`} fill={STATUS_COLORS[index % STATUS_COLORS.length]} />
+                                        ))}
+                                    </Pie>
+                                </PieChart>
+                            </ResponsiveContainer>
+                            <button
+                                onClick={() => setFilteredStatus(null)}
+                                className="mt-4 bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-full transition duration-300 ease-in-out"
+                            >
+                                Clear Status Filter
+                            </button>
+                        </div>
+
+                        {/* Priority Pie Chart */}
+                        <div className="bg-white p-4 rounded-lg shadow-md flex flex-col items-center">
+                            <h3 className="text-xl font-semibold text-gray-800 mb-4">Projects by Priority</h3>
+                            <ResponsiveContainer width="100%" height={300}>
+                                <PieChart>
+                                    <Pie
+                                        data={priorityData}
+                                        cx="50%"
+                                        cy="50%"
+                                        innerRadius={60}
+                                        outerRadius={90}
+                                        fill="#8884d8"
+                                        paddingAngle={5}
+                                        dataKey="value"
+                                        activeIndex={filteredPriority ? priorityData.findIndex(d => d.name === filteredPriority) : -1}
+                                        activeShape={(props) => renderActiveShape(props, setFilteredPriority, 'All Priorities')}
+                                        onClick={(data) => setFilteredPriority(data.name)}
+                                    >
+                                        {priorityData.map((entry, index) => (
+                                            <Cell key={`priority-cell-${index}`} fill={PRIORITY_COLORS[index % PRIORITY_COLORS.length]} />
+                                        ))}
+                                    </Pie>
+                                </PieChart>
+                            </ResponsiveContainer>
+                            <button
+                                onClick={() => setFilteredPriority(null)}
+                                className="mt-4 bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-full transition duration-300 ease-in-out"
+                            >
+                                Clear Priority Filter
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="flex justify-between items-center mb-6">
+                        <h2 className="text-2xl font-semibold text-gray-800">Your Projects</h2>
+                        <div className="flex space-x-4">
+                            <button
+                                onClick={handleAddProject}
+                                className="bg-purple-600 hover:bg-purple-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-opacity-50"
+                            >
+                                + Add New Project
+                            </button>
+                            <button
+                                onClick={() => setShowReportOptionsModal(true)}
+                                className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50"
+                            >
+                                Create Report
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Filter and Search Section */}
+                    <div className="bg-white p-4 rounded-lg shadow-md mb-6 flex flex-col sm:flex-row gap-4">
+                        <div className="flex-grow">
+                            <label htmlFor="category-filter" className="block text-gray-700 text-sm font-bold mb-2">Filter by Category:</label>
+                            <select
+                                id="category-filter"
+                                value={filteredCategory}
+                                onChange={(e) => setFilteredCategory(e.target.value)}
+                                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                            >
+                                <option value="All">All Categories</option>
+                                <option value="NPD">NPD</option>
+                                <option value="Sourcing">Sourcing</option>
+                            </select>
+                        </div>
+                        <div className="flex-grow">
+                            <label htmlFor="search-projects" className="block text-gray-700 text-sm font-bold mb-2">Search (Project/Manager/Vendor):</label>
+                            <input
+                                id="search-projects"
+                                type="text"
+                                value={searchTerm}
+                                onChange={(e) => setSearchTerm(e.target.value)}
+                                placeholder="Search by Project, Manager, or Vendor name..."
+                                className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                            />
+                        </div>
+                    </div>
+
+                    <div className="bg-white p-4 rounded-lg shadow-md mb-6">
+                        <label htmlFor="sort-by" className="block text-gray-700 text-sm font-bold mb-2">Sort Projects By:</label>
+                        <select
+                            id="sort-by"
+                            value={sortOption}
+                            onChange={(e) => setSortOption(e.target.value)}
+                            className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline bg-gray-100"
+                        >
+                            <option value="none">Default (Creation Order)</option>
+                            <option value="startDate">Start Date</option>
+                            <option value="submissionDate">Submission Date</option>
+                            <option value="projectNumber">Project Number (Creation Order)</option>
+                            <option value="priority">Priority</option>
+                        </select>
+                    </div>
+
+                    <h2 className="text-2xl font-semibold text-gray-800 mb-6">
+                        {filteredStatus ? `Projects with Status: ${filteredStatus}` : filteredPriority ? `Projects with Priority: ${filteredPriority}` : 'All Projects'}
+                    </h2>
+
+                    {displayedProjects.length === 0 ? (
+                        <p className="text-center text-gray-600 text-lg py-10">No projects match the current filter/sort criteria.</p>
+                    ) : (
+                        <div className="space-y-4">
+                            {displayedProjects.map((project) => (
+                                <div
+                                    key={project.id}
+                                    className="bg-white border border-gray-200 rounded-lg p-4 shadow-md flex flex-col justify-between transition duration-200 ease-in-out hover:shadow-lg hover:border-blue-300 cursor-pointer"
+                                    onClick={() => handleViewProject(project)}
+                                >
+                                    <div className="flex-grow flex flex-col sm:flex-row items-start">
+                                        <div className="flex-grow">
+                                            <h3 className="text-xl font-bold text-blue-700 mb-2">{project.name}</h3>
+                                            <div className="text-sm text-gray-600 space-y-0.5">
+                                                {project.projectManager && <p><span className="font-medium">Project Manager:</span> {project.projectManager}</p>}
+                                                {project.vendorName && <p><span className="font-medium">Vendor Name:</span> {project.vendorName}</p>}
+                                                <p><span className="font-medium">MRP:</span> {project.mrpCurrency} {project.mrp}</p>
+                                                <p className="text-base font-semibold text-gray-700"><span className="font-medium">Estimated Submission Date:</span> {project.estimatedDate}</p>
+                                                <p><span className="font-medium">Status:</span> <span className={`font-semibold ${
+                                                    project.status === 'Completed' ? 'text-green-600' :
+                                                    project.status === 'Cancelled' ? 'text-red-600' :
+                                                    project.status === 'On Hold' ? 'text-yellow-600' :
+                                                    project.status === 'Delayed' ? 'text-red-700' :
+                                                    'text-blue-600'
+                                                }`}>{project.status}</span></p>
+                                                <p><span className="font-medium">Priority:</span> <span className={`font-semibold ${
+                                                    project.priority === 'Urgent' ? 'text-red-800' :
+                                                    project.priority === 'High' ? 'text-orange-700' :
+                                                    project.priority === 'Medium-1' ? 'text-green-700' :
+                                                    project.priority === 'Medium-2' ? 'text-blue-700' :
+                                                    'text-gray-700'
+                                                }`}>{project.priority}</span></p>
+                                                {project.mrpStickerUrl && (
+                                                    <p>
+                                                        <a
+                                                            href={project.mrpStickerUrl}
+                                                            target="_blank"
+                                                            rel="noopener noreferrer"
+                                                            className="text-blue-500 hover:underline font-medium"
+                                                            onClick={(e) => e.stopPropagation()}
+                                                        >
+                                                            View MRP Sticker (PDF)
+                                                        </a>
+                                                    </p>
+                                                )}
+                                            </div>
+                                        </div>
+                                        {project.productImageUrl && (
+                                            <div className="flex-shrink-0 mt-4 sm:mt-0 sm:ml-4">
+                                                <img
+                                                    src={project.productImageUrl}
+                                                    alt="Product"
+                                                    className="w-32 h-32 object-cover rounded-md cursor-pointer border border-gray-300"
+                                                    onClick={(e) => { e.stopPropagation(); handleImageClick(project.productImageUrl); }}
+                                                    onError={(e) => { e.target.onerror = null; e.target.src = "https://placehold.co/128x128/cccccc/000000?text=No+Img"; }}
+                                                />
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="flex justify-end mt-4">
+                                        <button
+                                            onClick={(e) => { e.stopPropagation(); handleDeleteProject(project.id); }}
+                                            className="bg-red-500 hover:bg-red-600 text-white text-sm font-bold py-1.5 px-3 rounded-full shadow-md transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-red-400 focus:ring-opacity-50"
+                                        >
+                                            Delete
+                                        </button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+
+                {/* Modals */}
+                <ProjectModal
+                    show={showAddModal}
+                    onClose={() => setShowAddModal(false)}
+                    onSave={handleSaveNewProject}
+                    isEditing={false}
+                    project={null}
+                    storage={storage}
+                    userId={userId}
+                />
+                <ProjectModal
+                    show={showDetailModal}
+                    onClose={() => { setShowDetailModal(false); setIsEditing(false); setSelectedProject(null); }}
+                    project={selectedProject}
+                    onSave={handleUpdateProject}
+                    isEditing={isEditing}
+                    onEditRequest={handleEditProjectRequest}
+                    storage={storage}
+                    userId={userId}
+                />
+                <ConfirmationModal
+                    show={showConfirmDeleteModal}
+                    message="Are you sure you want to delete this project?"
+                    onConfirm={handleConfirmDelete}
+                    onCancel={() => { setShowConfirmDeleteModal(false); setProjectToDeleteId(null); }}
+                />
+                <PasscodeModal
+                    show={showPasscodeModal || showInitialPinSetup} // Show if initial setup or regular passcode needed
+                    onVerify={passcodeActionType === 'delete' ? handleVerifyDeletePasscode : handleVerifyEditPasscode}
+                    onCancel={() => { setShowPasscodeModal(false); setShowInitialPinSetup(false); setPasscodeActionType(''); setProjectToDeleteId(null); }}
+                    actionType={passcodeActionType}
+                    userPins={userPins}
+                    onSetPins={(editPin, deletePin) => {
+                        saveUserPins(editPin, deletePin);
+                        setShowInitialPinSetup(false); // Hide initial setup after pins are set
+                        setShowPasscodeModal(false); // Hide passcode modal if it was open for setting
+                    }}
+                    onForgotPin={(setShowSetPinsCallback) => {
+                        // This simulates the "forgot PIN" flow.
+                        // In a real app, this would trigger an email OTP.
+                        // Here, we re-authenticate with Google and then allow setting new PINs.
+                        if (auth.currentUser) {
+                            // If already signed in, just allow setting new PINs
+                            setShowSetPinsCallback(true);
+                        } else {
+                            // If not signed in, prompt Google sign-in first
+                            handleGoogleSignIn().then(() => {
+                                if (auth.currentUser) {
+                                    setShowSetPinsCallback(true);
+                                }
+                            });
+                        }
+                    }}
+                />
+                <ImageEnlargeModal
+                    show={showImageEnlargeModal}
+                    imageUrl={enlargedImageUrl}
+                    onClose={() => setShowImageEnlargeModal(false)}
+                />
+                <ReportOptionsModal
+                    show={showReportOptionsModal}
+                    onClose={() => setShowReportOptionsModal(false)}
+                    onExportJson={handleExportDataAsJson}
+                    onViewPrintable={handleViewPrintableReport}
+                />
+                <PrintableReportView
+                    show={showPrintableReport}
+                    onClose={() => setShowPrintableReport(false)}
+                    projects={displayedProjects}
+                    statusData={statusData}
+                    priorityData={priorityData}
+                    statusColors={STATUS_COLORS}
+                    priorityColors={PRIORITY_COLORS}
+                />
+            </div>
+        </FirebaseContext.Provider>
+    );
+};
+
+export default App;
+
